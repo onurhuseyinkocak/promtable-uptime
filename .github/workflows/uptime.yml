@@ -1,0 +1,54 @@
+# Source for .github/workflows/uptime.yml in the PUBLIC sidecar repo onurhuseyinkocak/promtable-uptime (with scripts/uptime-check.mjs copied to its root).
+# Public repo => standard runners cost $0; the private promtable repo has no minutes to spare for a 15-min cron.
+name: Promtable uptime
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe URLs and Workers error rate
+        id: probe
+        continue-on-error: true
+        env:
+          CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
+          REPORT_FILE: report.md
+        run: node uptime-check.mjs
+      - name: Open, update or close the outage issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ steps.probe.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          echo "" >> report.md; echo "Run: $RUN_URL" >> report.md
+          open=$(gh issue list --label outage --state open --json number --jq '.[0].number // empty')
+          if [ "$OUTCOME" != "success" ]; then
+            if [ -n "$open" ]; then gh issue comment "$open" --body-file report.md
+            else gh label create outage --color B60205 --force >/dev/null; gh issue create --title "promtable.com outage $(date -u +%FT%RZ)" --label outage --body-file report.md; fi
+          elif [ -n "$open" ]; then
+            gh issue comment "$open" --body "Recovered. $RUN_URL"; gh issue close "$open"
+          fi
+      # Public-repo schedules auto-disable after 60 days without activity; re-enabling resets that timer.
+      - name: Keep schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/uptime.yml/enable" || true
+      - name: Fail the run when the site is failing
+        if: steps.probe.outcome != 'success'
+        run: exit 1
